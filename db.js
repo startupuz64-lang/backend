@@ -398,7 +398,118 @@ async function initTables(p) {
     ON CONFLICT (key) DO NOTHING;
   `).catch(() => {});
 
-  // 11. Indexes
+  // 11. Orders (mijoz buyurtmalari)
+  await run(`
+    CREATE TABLE IF NOT EXISTS orders (
+      id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+      customer_id   UUID         NOT NULL,
+      qr_token      UUID         NOT NULL DEFAULT gen_random_uuid(),
+      status        VARCHAR(30)  NOT NULL DEFAULT 'pending',
+      total_price   NUMERIC      NOT NULL DEFAULT 0,
+      pickup_time   TIMESTAMPTZ,
+      note          TEXT         DEFAULT '',
+      is_paid       BOOLEAN      DEFAULT FALSE,
+      completed_by  UUID,
+      completed_at  TIMESTAMPTZ,
+      created_at    TIMESTAMPTZ  DEFAULT NOW(),
+      updated_at    TIMESTAMPTZ  DEFAULT NOW()
+    );
+  `);
+
+  const orderFKs = [
+    [`orders_customer_id_fkey`,  `customer_id`,  `users(id)`, ``],
+    [`orders_completed_by_fkey`, `completed_by`, `users(id)`, `ON DELETE SET NULL`],
+  ];
+  for (const [name, col, ref, extra] of orderFKs) {
+    await run(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.table_constraints
+          WHERE table_name='orders' AND constraint_name='${name}'
+        ) THEN
+          ALTER TABLE orders ADD CONSTRAINT ${name}
+            FOREIGN KEY (${col}) REFERENCES ${ref} ${extra};
+        END IF;
+      END $$;
+    `).catch(() => {});
+  }
+
+  await run(`
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'orders_qr_token_key'
+      ) THEN
+        ALTER TABLE orders ADD CONSTRAINT orders_qr_token_key UNIQUE (qr_token);
+      END IF;
+    END $$;
+  `).catch(() => {});
+
+  // 12. Order items
+  await run(`
+    CREATE TABLE IF NOT EXISTS order_items (
+      id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+      order_id      UUID         NOT NULL,
+      product_id    UUID,
+      product_name  VARCHAR(255) NOT NULL DEFAULT '',
+      unit_price    NUMERIC      NOT NULL DEFAULT 0,
+      qty           INTEGER      NOT NULL DEFAULT 1,
+      line_total    NUMERIC      NOT NULL DEFAULT 0,
+      created_at    TIMESTAMPTZ  DEFAULT NOW()
+    );
+  `);
+
+  const orderItemFKs = [
+    [`order_items_order_id_fkey`,   `order_id`,   `orders(id)`,   `ON DELETE CASCADE`],
+    [`order_items_product_id_fkey`, `product_id`, `products(id)`, `ON DELETE SET NULL`],
+  ];
+  for (const [name, col, ref, extra] of orderItemFKs) {
+    await run(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.table_constraints
+          WHERE table_name='order_items' AND constraint_name='${name}'
+        ) THEN
+          ALTER TABLE order_items ADD CONSTRAINT ${name}
+            FOREIGN KEY (${col}) REFERENCES ${ref} ${extra};
+        END IF;
+      END $$;
+    `).catch(() => {});
+  }
+
+  // 13. Offline sales (ilovadan tashqari sotuvlar)
+  await run(`
+    CREATE TABLE IF NOT EXISTS offline_sales (
+      id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+      product_id    UUID,
+      product_name  VARCHAR(255) NOT NULL DEFAULT '',
+      unit_price    NUMERIC      NOT NULL DEFAULT 0,
+      qty           INTEGER      NOT NULL DEFAULT 1,
+      total_price   NUMERIC      NOT NULL DEFAULT 0,
+      operator_id   UUID         NOT NULL,
+      note          TEXT         DEFAULT '',
+      created_at    TIMESTAMPTZ  DEFAULT NOW()
+    );
+  `);
+
+  const offlineSaleFKs = [
+    [`offline_sales_product_id_fkey`,  `product_id`,  `products(id)`, `ON DELETE SET NULL`],
+    [`offline_sales_operator_id_fkey`, `operator_id`, `users(id)`,    ``],
+  ];
+  for (const [name, col, ref, extra] of offlineSaleFKs) {
+    await run(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.table_constraints
+          WHERE table_name='offline_sales' AND constraint_name='${name}'
+        ) THEN
+          ALTER TABLE offline_sales ADD CONSTRAINT ${name}
+            FOREIGN KEY (${col}) REFERENCES ${ref} ${extra};
+        END IF;
+      END $$;
+    `).catch(() => {});
+  }
+
+  // 14. Indexes
   const indexes = [
     `CREATE INDEX IF NOT EXISTS idx_products_status   ON products (status, created_at DESC);`,
     `CREATE INDEX IF NOT EXISTS idx_products_owner    ON products (owner_id);`,
@@ -411,6 +522,12 @@ async function initTables(p) {
     `CREATE INDEX IF NOT EXISTS idx_rentals_owner     ON rentals (owner_id);`,
     `CREATE INDEX IF NOT EXISTS idx_bookings_rental   ON rental_bookings (rental_id);`,
     `CREATE INDEX IF NOT EXISTS idx_bookings_renter   ON rental_bookings (renter_id);`,
+    `CREATE INDEX IF NOT EXISTS idx_orders_customer   ON orders (customer_id);`,
+    `CREATE INDEX IF NOT EXISTS idx_orders_status     ON orders (status, created_at DESC);`,
+    `CREATE INDEX IF NOT EXISTS idx_orders_qr_token   ON orders (qr_token);`,
+    `CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items (order_id);`,
+    `CREATE INDEX IF NOT EXISTS idx_offline_sales_op  ON offline_sales (operator_id, created_at DESC);`,
+    `CREATE INDEX IF NOT EXISTS idx_offline_sales_prod ON offline_sales (product_id);`,
   ];
   for (const idx of indexes) {
     await run(idx).catch(() => {});
@@ -419,4 +536,19 @@ async function initTables(p) {
   console.log("✅ Database jadvallari tayyor");
 }
 
-module.exports = { connect, query };
+async function withTransaction(fn) {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+module.exports = { connect, query, withTransaction };

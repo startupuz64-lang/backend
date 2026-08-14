@@ -3,11 +3,8 @@ const cors = require("cors");
 
 const authRoutes = require("./routes/auth");
 const productRoutes = require("./routes/products");
-const offerRoutes = require("./routes/offers");
-const paymentRoutes = require("./routes/payments");
-const walletRoutes = require("./routes/wallet");
+const orderRoutes = require("./routes/orders");
 const operatorRoutes = require("./routes/operator");
-const rentalRoutes   = require("./routes/rentals");
 const settingsRoutes = require("./routes/settings");
 
 const app = express();
@@ -52,11 +49,8 @@ if (process.env.NODE_ENV !== "production") {
 // ── Routes ────────────────────────────────────────────────────────
 app.use("/api/auth", authRoutes);
 app.use("/api/products", productRoutes);
-app.use("/api/offers", offerRoutes);
-app.use("/api/payments", paymentRoutes);
-app.use("/api/wallet", walletRoutes);
+app.use("/api/orders", orderRoutes);
 app.use("/api/operator", operatorRoutes);
-app.use("/api/rentals",   rentalRoutes);
 app.use("/api/settings",  settingsRoutes);
 
 // ── Ping: Render + Neon ni uyg'otadi ─────────────────────────────
@@ -70,7 +64,7 @@ app.get("/api/ping", async (_req, res) => {
 app.get("/", (_req, res) => {
   res.json({
     status: "ok",
-    message: "ReMarket API ishlayapti ✅",
+    message: "Dadajon Tort API ishlayapti ✅",
     database: "PostgreSQL",
     smsEnabled: process.env.SMS_ENABLED === "true",
     paymentEnabled: process.env.PAYMENT_ENABLED === "true",

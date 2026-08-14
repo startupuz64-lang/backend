@@ -1,163 +1,109 @@
 const express = require("express");
 const { query } = require("../db");
 const Product = require("../models/Product");
-const User = require("../models/User");
+const Order = require("../models/Order");
+const OfflineSale = require("../models/OfflineSale");
 const operatorAuth = require("../middleware/operatorAuth");
 
 const router = express.Router();
 router.use(operatorAuth);
 
 const MAIN_OPERATOR_PHONE = "331350206";
-const depositInProgress = new Set();
 
 function isMainOp(user) {
   return (user.phone || "").replace(/\D/g, "").slice(-9) === MAIN_OPERATOR_PHONE;
 }
 
-// ── Pending postlar (tasdiqlash navbati) ─────────────────────────
-router.get("/pending-posts", async (req, res) => {
+function todayRange() {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const end = new Date();
+  end.setHours(23, 59, 59, 999);
+  return { start, end };
+}
+
+// ══════════════════════════ Mahsulotlar ══════════════════════════
+
+// ── Barcha mahsulotlar (operator panel) ──────────────────────────
+router.get("/products", async (req, res) => {
   try {
-    const { rows } = await query(
-      `SELECT p.*, u.name AS owner_name, u.phone AS owner_phone, u.telegram AS owner_telegram
-       FROM products p
-       LEFT JOIN users u ON u.id = p.owner_id
-       WHERE p.status = 'pending_approval'
-       ORDER BY p.created_at ASC`
-    );
-    res.json(rows.map(p => ({
-      id: p.id, name: p.name, category: p.category,
-      price: Number(p.price), unit: p.unit, qty: p.qty,
-      condition: p.condition, viloyat: p.viloyat, tuman: p.tuman,
-      photo: p.photo,
-      photos: p.photos ? JSON.parse(p.photos) : (p.photo ? [p.photo] : []),
-      status: p.status,
-      ownerName: p.owner_name || "Noma'lum",
-      ownerPhone: p.owner_phone || "",
-      ownerTelegram: p.owner_telegram || "",
-      ownerId: p.owner_id,
-      createdAt: p.created_at,
-      view_count: Number(p.view_count || 0),
-      like_count: Number(p.like_count || 0),
-    })));
+    const q = (req.query.q || "").trim();
+    const VALID_STATUSES = ["active", "hidden", "deleted"];
+    const statusFilter = req.query.status || "all";
+    const useStatus = statusFilter !== "all" && VALID_STATUSES.includes(statusFilter);
+
+    let rows;
+    if (!q && !useStatus) {
+      ({ rows } = await query(
+        `SELECT id, name, price, unit, qty, category, status, view_count, like_count, created_at
+         FROM products WHERE status != 'deleted'
+         ORDER BY created_at DESC LIMIT 100`
+      ));
+    } else if (!q && useStatus) {
+      ({ rows } = await query(
+        `SELECT id, name, price, unit, qty, category, status, view_count, like_count, created_at
+         FROM products WHERE status = $1
+         ORDER BY created_at DESC LIMIT 100`,
+        [statusFilter]
+      ));
+    } else if (q && !useStatus) {
+      ({ rows } = await query(
+        `SELECT id, name, price, unit, qty, category, status, view_count, like_count, created_at
+         FROM products WHERE status != 'deleted' AND name ILIKE $1
+         ORDER BY created_at DESC LIMIT 50`,
+        [`%${q}%`]
+      ));
+    } else {
+      ({ rows } = await query(
+        `SELECT id, name, price, unit, qty, category, status, view_count, like_count, created_at
+         FROM products WHERE status = $1 AND name ILIKE $2
+         ORDER BY created_at DESC LIMIT 50`,
+        [statusFilter, `%${q}%`]
+      ));
+    }
+    res.json(rows);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// ── Postni tasdiqlash ─────────────────────────────────────────────
-// PAYMENT_ENABLED=true  → pending_payment (to'lov kutiladi)
-// PAYMENT_ENABLED=false → active (to'g'ridan-to'g'ri faollashadi)
-router.put("/posts/:id/approve", async (req, res) => {
+// ── Yangi mahsulot yaratish ───────────────────────────────────────
+router.post("/products", async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id);
-    if (!product) return res.status(404).json({ message: "Post topilmadi" });
-    if (product.status !== "pending_approval") {
-      return res.status(400).json({ message: "Bu post allaqachon ko'rib chiqilgan" });
+    const { name, category, price, unit, qty, photo, photos } = req.body;
+    if (!name || !price || qty === undefined || qty === null) {
+      return res.status(400).json({ message: "Nomi, narxi va soni majburiy" });
     }
 
-    const paymentEnabled = process.env.PAYMENT_ENABLED === "true";
-    const newStatus = paymentEnabled ? "pending_payment" : "active";
+    const photosJson = Array.isArray(photos) && photos.length
+      ? JSON.stringify(photos)
+      : (photo ? JSON.stringify([photo]) : null);
 
-    const updated = await Product.setStatus(req.params.id, newStatus, {
-      approved_by: req.user.id,
+    const product = await Product.create({
+      name,
+      category: category || "Tortlar",
+      price: Number(price),
+      unit: unit || "dona",
+      qty: Number(qty) || 0,
+      photo: photo || (Array.isArray(photos) ? photos[0] : null) || null,
+      photos: photosJson,
+      owner_id: req.user.id,
+      status: "active",
     });
 
-    // Egasiga xabar
-    if (product.owner_id) {
-      const owner = await User.findById(product.owner_id);
-      if (owner?.tg_chat_id) {
-        const { notifyUser } = require("../bot");
-        const msg = paymentEnabled
-          ? `✅ *E'loningiz tasdiqlandi!*\n\n` +
-            `📦 Mahsulot: ${product.name}\n\n` +
-            `💳 Endi to'lov qiling:\n` +
-            `Karta: *${process.env.OPERATOR_CARD || "9860 0000 0000 0000"}*\n` +
-            `Egasi: ${process.env.OPERATOR_NAME || "Operator"}\n\n` +
-            `To'lov qilgandan so'ng e'loningiz faollashtiriladi.`
-          : `✅ *E'loningiz tasdiqlandi va faollashtirildi!*\n\n` +
-            `📦 Mahsulot: ${product.name}\n\n` +
-            `🎉 E'loningiz bozorda ko'rinmoqda!`;
-        await notifyUser(owner.tg_chat_id, msg, { parse_mode: "Markdown" }).catch(() => {});
-      }
-    }
-
-    res.json({ message: "Tasdiqlandi", product: updated });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ── Postni rad etish → deleted ───────────────────────────────────
-router.put("/posts/:id/reject", async (req, res) => {
-  try {
-    const { reason } = req.body;
-    if (!reason?.trim()) return res.status(400).json({ message: "Rad etish sababi majburiy" });
-
-    const product = await Product.findById(req.params.id);
-    if (!product) return res.status(404).json({ message: "Post topilmadi" });
-
-    const updated = await Product.setStatus(req.params.id, "deleted", {
-      rejected_reason: reason.trim(),
+    res.status(201).json({
+      ...product,
+      photos: product.photos ? JSON.parse(product.photos) : (product.photo ? [product.photo] : []),
     });
-
-    // Egasiga xabar
-    if (product.owner_id) {
-      const owner = await User.findById(product.owner_id);
-      if (owner?.tg_chat_id) {
-        const { notifyUser } = require("../bot");
-        await notifyUser(owner.tg_chat_id,
-          `❌ *E'loningiz rad etildi*\n\n` +
-          `📦 Mahsulot: ${product.name}\n` +
-          `📝 Sabab: ${reason.trim()}`,
-          { parse_mode: "Markdown" }
-        ).catch(() => {});
-      }
-    }
-
-    res.json({ message: "Rad etildi", product: updated });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// ── Postni yashirish ─────────────────────────────────────────────
-router.put("/posts/:id/hide", async (req, res) => {
-  try {
-    const updated = await Product.setStatus(req.params.id, "hidden");
-    if (!updated) return res.status(404).json({ message: "Post topilmadi" });
-    res.json({ message: "Yashirildi", product: updated });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ── Postni ko'rsatish ────────────────────────────────────────────
-router.put("/posts/:id/show", async (req, res) => {
-  try {
-    const updated = await Product.setStatus(req.params.id, "active");
-    if (!updated) return res.status(404).json({ message: "Post topilmadi" });
-    res.json({ message: "Ko'rsatildi", product: updated });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ── To'lovni yoqish/o'chirish (pending_payment ↔ active) ─────────
-router.put("/posts/:id/toggle-payment", async (req, res) => {
-  try {
-    const product = await Product.findById(req.params.id);
-    if (!product) return res.status(404).json({ message: "Post topilmadi" });
-    const newStatus = product.status === "pending_payment" ? "active" : "pending_payment";
-    const updated = await Product.setStatus(req.params.id, newStatus);
-    res.json({ message: newStatus === "active" ? "To'lovsiz faollashtirildi" : "To'lov kutish holatiga qaytarildi", product: updated });
-  } catch (err) { res.status(500).json({ message: err.message }); }
-});
-
-// ── Postni tahrirlash (operator) ─────────────────────────────────
+// ── Mahsulotni tahrirlash (operator) ─────────────────────────────
 router.put("/posts/:id/edit", async (req, res) => {
   try {
-    const { query } = require("../db");
-    const allowed = ["name","category","price","unit","qty","condition","viloyat","tuman"];
+    const allowed = ["name", "category", "price", "unit", "qty"];
     const fields = []; const vals = [];
     for (const f of allowed) {
       if (req.body[f] !== undefined) { fields.push(`${f} = $${vals.length + 1}`); vals.push(req.body[f]); }
@@ -168,80 +114,241 @@ router.put("/posts/:id/edit", async (req, res) => {
       `UPDATE products SET ${fields.join(", ")}, updated_at=NOW() WHERE id=$${vals.length} RETURNING *`,
       vals
     );
-    if (!rows[0]) return res.status(404).json({ message: "Post topilmadi" });
+    if (!rows[0]) return res.status(404).json({ message: "Mahsulot topilmadi" });
     res.json({ message: "Yangilandi", product: rows[0] });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// ── Postni o'chirish (permanent soft delete) ─────────────────────
+// ── Mahsulotni yashirish/ko'rsatish/o'chirish ────────────────────
+router.put("/posts/:id/hide", async (req, res) => {
+  try {
+    const updated = await Product.setStatus(req.params.id, "hidden");
+    if (!updated) return res.status(404).json({ message: "Mahsulot topilmadi" });
+    res.json({ message: "Yashirildi", product: updated });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+router.put("/posts/:id/show", async (req, res) => {
+  try {
+    const updated = await Product.setStatus(req.params.id, "active");
+    if (!updated) return res.status(404).json({ message: "Mahsulot topilmadi" });
+    res.json({ message: "Ko'rsatildi", product: updated });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 router.delete("/posts/:id", async (req, res) => {
   try {
     const updated = await Product.setStatus(req.params.id, "deleted");
-    if (!updated) return res.status(404).json({ message: "Post topilmadi" });
+    if (!updated) return res.status(404).json({ message: "Mahsulot topilmadi" });
     res.json({ message: "O'chirildi" });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// ── Barcha postlar (operator panel) ─────────────────────────────
-router.get("/products", async (req, res) => {
-  try {
-    const q = (req.query.q || "").trim();
-    const VALID_STATUSES = ["active", "pending_approval", "pending_payment", "hidden", "deleted"];
-    const statusFilter = req.query.status || "all";
-    const useStatus = statusFilter !== "all" && VALID_STATUSES.includes(statusFilter);
+// ══════════════════════════ Buyurtmalar ══════════════════════════
 
-    let rows;
-    if (!q && !useStatus) {
-      ({ rows } = await query(
-        `SELECT p.id, p.name, p.price, p.unit, p.qty, p.category, p.viloyat, p.status,
-                p.view_count, p.like_count,
-                u.name AS owner_name, u.phone AS owner_phone, p.created_at
-         FROM products p LEFT JOIN users u ON p.owner_id = u.id
-         WHERE p.status != 'deleted'
-         ORDER BY p.created_at DESC LIMIT 50`
-      ));
-    } else if (!q && useStatus) {
-      ({ rows } = await query(
-        `SELECT p.id, p.name, p.price, p.unit, p.qty, p.category, p.viloyat, p.status,
-                p.view_count, p.like_count,
-                u.name AS owner_name, u.phone AS owner_phone, p.created_at
-         FROM products p LEFT JOIN users u ON p.owner_id = u.id
-         WHERE p.status = $1
-         ORDER BY p.created_at DESC LIMIT 50`,
-        [statusFilter]
-      ));
-    } else if (q && !useStatus) {
-      ({ rows } = await query(
-        `SELECT p.id, p.name, p.price, p.unit, p.qty, p.category, p.viloyat, p.status,
-                p.view_count, p.like_count,
-                u.name AS owner_name, u.phone AS owner_phone, p.created_at
-         FROM products p LEFT JOIN users u ON p.owner_id = u.id
-         WHERE p.status != 'deleted'
-           AND (p.name ILIKE $1 OR p.id::text ILIKE $1 OR u.phone ILIKE $1 OR u.name ILIKE $1)
-         ORDER BY p.created_at DESC LIMIT 30`,
-        [`%${q}%`]
-      ));
-    } else {
-      ({ rows } = await query(
-        `SELECT p.id, p.name, p.price, p.unit, p.qty, p.category, p.viloyat, p.status,
-                p.view_count, p.like_count,
-                u.name AS owner_name, u.phone AS owner_phone, p.created_at
-         FROM products p LEFT JOIN users u ON p.owner_id = u.id
-         WHERE p.status = $1
-           AND (p.name ILIKE $2 OR p.id::text ILIKE $2 OR u.phone ILIKE $2 OR u.name ILIKE $2)
-         ORDER BY p.created_at DESC LIMIT 30`,
-        [statusFilter, `%${q}%`]
-      ));
-    }
-    res.json(rows);
+router.get("/orders", async (req, res) => {
+  try {
+    const status = req.query.status || "pending";
+    const orders = await Order.findByOperatorQueue(status);
+    res.json(orders);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// ── Foydalanuvchilar ─────────────────────────────────────────────
+router.get("/orders/qr/:qrToken", async (req, res) => {
+  try {
+    const order = await Order.findByQrToken(req.params.qrToken);
+    if (!order) return res.status(404).json({ message: "Buyurtma topilmadi" });
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+router.put("/orders/:id/complete", async (req, res) => {
+  try {
+    const { isPaid } = req.body || {};
+    const order = await Order.complete(req.params.id, req.user.id, { isPaid });
+    if (!order) return res.status(400).json({ message: "Buyurtma allaqachon yakunlangan yoki bekor qilingan" });
+
+    if (order.customer_id) {
+      const { rows } = await query("SELECT tg_chat_id FROM users WHERE id = $1", [order.customer_id]);
+      if (rows[0]?.tg_chat_id) {
+        const { notifyUser } = require("../bot");
+        notifyUser(rows[0].tg_chat_id,
+          `🎉 *Buyurtmangiz topshirildi!*\n\nRahmat, Dadajon Tort'ni tanlaganingiz uchun!`,
+          { parse_mode: "Markdown" }
+        ).catch(() => {});
+      }
+    }
+
+    res.json({ message: "Buyurtma topshirildi", order });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+router.put("/orders/:id/cancel", async (req, res) => {
+  try {
+    const order = await Order.cancel(req.params.id);
+    if (!order) return res.status(400).json({ message: "Buyurtmani bekor qilib bo'lmadi" });
+    res.json({ message: "Bekor qilindi", order });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ══════════════════════════ Oflayn sotuvlar ══════════════════════
+
+router.post("/offline-sales", async (req, res) => {
+  try {
+    const { productId, qty, note } = req.body;
+    if (!productId || !Number.isInteger(qty) || qty <= 0) {
+      return res.status(400).json({ message: "Mahsulot va son majburiy" });
+    }
+    const sale = await OfflineSale.create({ productId, qty, operatorId: req.user.id, note });
+    res.status(201).json(sale);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+});
+
+router.get("/offline-sales", async (req, res) => {
+  try {
+    const scope = req.query.scope === "all" ? "all" : "mine";
+    if (scope === "all" && !isMainOp(req.user)) {
+      return res.status(403).json({ message: "Faqat bosh operator barcha oflayn sotuvlarni ko'ra oladi" });
+    }
+    const sales = scope === "all"
+      ? await OfflineSale.findAll()
+      : await OfflineSale.findByOperator(req.user.id);
+    res.json(sales);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ══════════════════════════ Statistika ═══════════════════════════
+
+router.get("/stats/daily", async (req, res) => {
+  try {
+    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    let operatorId = null;
+    if (!isMainOp(req.user)) {
+      operatorId = req.user.id;
+    } else if (req.query.operatorId) {
+      operatorId = req.query.operatorId;
+    }
+
+    const orderStats = await Order.statsDaily(date, operatorId);
+    const offlineStats = await OfflineSale.statsDaily(date, operatorId);
+    res.json({
+      orders: orderStats,
+      offline: offlineStats,
+      combined: {
+        count: orderStats.count + offlineStats.count,
+        revenue: orderStats.revenue + offlineStats.revenue,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+router.get("/stats/by-operator", async (req, res) => {
+  if (!isMainOp(req.user)) {
+    return res.status(403).json({ message: "Faqat bosh operator uchun" });
+  }
+  try {
+    const { start, end } = todayRange();
+    const from = req.query.from ? new Date(req.query.from) : start;
+    const to = req.query.to ? new Date(req.query.to) : end;
+
+    const [orderRows, offlineRows, operators] = await Promise.all([
+      Order.statsByOperator(from, to),
+      OfflineSale.statsByOperator(from, to),
+      query(`SELECT id, name, phone FROM users WHERE role = 'operator' OR phone = $1`, [MAIN_OPERATOR_PHONE]),
+    ]);
+
+    const byId = {};
+    for (const op of operators.rows) {
+      byId[op.id] = { operatorId: op.id, name: op.name, appOrders: 0, appRevenue: 0, offlineSales: 0, offlineRevenue: 0 };
+    }
+    for (const r of orderRows) {
+      if (!r.operatorId) continue;
+      if (!byId[r.operatorId]) byId[r.operatorId] = { operatorId: r.operatorId, name: "?", appOrders: 0, appRevenue: 0, offlineSales: 0, offlineRevenue: 0 };
+      byId[r.operatorId].appOrders = r.orderCount;
+      byId[r.operatorId].appRevenue = r.revenue;
+    }
+    for (const r of offlineRows) {
+      if (!byId[r.operatorId]) byId[r.operatorId] = { operatorId: r.operatorId, name: "?", appOrders: 0, appRevenue: 0, offlineSales: 0, offlineRevenue: 0 };
+      byId[r.operatorId].offlineSales = r.saleCount;
+      byId[r.operatorId].offlineRevenue = r.revenue;
+    }
+
+    const result = Object.values(byId).map((o) => ({
+      ...o,
+      totalRevenue: o.appRevenue + o.offlineRevenue,
+    }));
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+router.get("/stats/by-product", async (req, res) => {
+  try {
+    const { start, end } = todayRange();
+    const from = req.query.from ? new Date(req.query.from) : start;
+    const to = req.query.to ? new Date(req.query.to) : end;
+
+    const [orderRows, offlineRows] = await Promise.all([
+      Order.statsByProduct(from, to),
+      OfflineSale.statsByProduct(from, to),
+    ]);
+
+    const byId = {};
+    for (const r of orderRows) {
+      const key = r.productId || r.productName;
+      byId[key] = { productId: r.productId, productName: r.productName, qty: r.qty, revenue: r.revenue };
+    }
+    for (const r of offlineRows) {
+      const key = r.productId || r.productName;
+      if (!byId[key]) byId[key] = { productId: r.productId, productName: r.productName, qty: 0, revenue: 0 };
+      byId[key].qty += r.qty;
+      byId[key].revenue += r.revenue;
+    }
+    res.json(Object.values(byId).sort((a, b) => b.revenue - a.revenue));
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+router.get("/stats", async (req, res) => {
+  try {
+    const { rows } = await query(`
+      SELECT
+        (SELECT COUNT(*) FROM users) AS total_users,
+        (SELECT COUNT(*) FROM products WHERE status = 'active') AS active_products,
+        (SELECT COUNT(*) FROM orders WHERE status = 'pending') AS pending_orders,
+        (SELECT COALESCE(SUM(total_price),0) FROM orders
+           WHERE status = 'completed' AND completed_at::date = CURRENT_DATE) AS today_revenue
+    `);
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ══════════════════════════ Foydalanuvchilar ═════════════════════
+
 router.get("/users", async (req, res) => {
   try {
     const q = (req.query.q || "").trim();
@@ -264,7 +371,6 @@ router.get("/users", async (req, res) => {
   }
 });
 
-// ── Foydalanuvchini bloklash ─────────────────────────────────────
 router.put("/users/:id/block", async (req, res) => {
   try {
     const { rows } = await query(
@@ -286,7 +392,6 @@ router.put("/users/:id/block", async (req, res) => {
   }
 });
 
-// ── Foydalanuvchi blokini ochish ─────────────────────────────────
 router.put("/users/:id/unblock", async (req, res) => {
   try {
     await query("UPDATE users SET is_blocked = FALSE WHERE id = $1", [req.params.id]);
@@ -296,7 +401,6 @@ router.put("/users/:id/unblock", async (req, res) => {
   }
 });
 
-// ── Foydalanuvchini o'chirish ────────────────────────────────────
 router.delete("/users/:id", async (req, res) => {
   try {
     const { rows } = await query("SELECT phone FROM users WHERE id = $1 LIMIT 1", [req.params.id]);
@@ -308,7 +412,6 @@ router.delete("/users/:id", async (req, res) => {
     if (req.params.id === req.user.id) {
       return res.status(400).json({ message: "O'zingizni o'chira olmaysiz" });
     }
-    // Postlari owner_id = NULL qolsin
     await Product.setOwnerNull(req.params.id);
     await query("DELETE FROM users WHERE id = $1", [req.params.id]);
     res.json({ message: "O'chirildi" });
@@ -317,83 +420,8 @@ router.delete("/users/:id", async (req, res) => {
   }
 });
 
-// ── Pul qo'shish ─────────────────────────────────────────────────
-router.post("/deposit", async (req, res) => {
-  const { phone, amount } = req.body;
-  if (!phone || !amount) return res.status(400).json({ message: "phone va amount majburiy" });
-  const sum = Number(amount);
-  if (isNaN(sum) || sum <= 0) return res.status(400).json({ message: "Summa noto'g'ri" });
+// ══════════════════════════ Operatorlar (faqat bosh operator) ═══
 
-  const phoneKey = phone.replace(/\D/g, "").slice(-9);
-  if (depositInProgress.has(phoneKey)) {
-    return res.status(429).json({ message: "Iltimos kuting, avvalgi amal bajarilmoqda" });
-  }
-  depositInProgress.add(phoneKey);
-
-  try {
-    const { rows: found } = await query(
-      "SELECT * FROM users WHERE phone = $1 LIMIT 1", [phoneKey]
-    );
-    if (!found[0]) return res.status(404).json({ message: "Foydalanuvchi topilmadi" });
-
-    const { rows } = await query(
-      "UPDATE users SET balance = balance + $1 WHERE id = $2 RETURNING id, name, phone, balance",
-      [sum, found[0].id]
-    );
-
-    if (found[0].tg_chat_id) {
-      const { notifyUser } = require("../bot");
-      await notifyUser(found[0].tg_chat_id,
-        `💰 *Hisobingiz to'ldirildi!*\n\nSumma: *${sum.toLocaleString()} so'm*\nJami balans: *${Number(rows[0].balance).toLocaleString()} so'm*`,
-        { parse_mode: "Markdown" }
-      ).catch(() => {});
-    }
-
-    res.json({ message: `${sum.toLocaleString()} so'm qo'shildi`, user: rows[0] });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  } finally {
-    depositInProgress.delete(phoneKey);
-  }
-});
-
-// ── Balansdan pul ayirish ─────────────────────────────────────────
-router.post("/withdraw", async (req, res) => {
-  try {
-    const { phone, amount } = req.body;
-    if (!phone || !amount) return res.status(400).json({ message: "phone va amount majburiy" });
-    const sum = Number(amount);
-    if (isNaN(sum) || sum <= 0) return res.status(400).json({ message: "Summa noto'g'ri" });
-
-    const phoneKey = phone.replace(/\D/g, "").slice(-9);
-    const { rows: found } = await query(
-      "SELECT * FROM users WHERE phone = $1 LIMIT 1", [phoneKey]
-    );
-    if (!found[0]) return res.status(404).json({ message: "Foydalanuvchi topilmadi" });
-    if (Number(found[0].balance) < sum) {
-      return res.status(400).json({ message: "Balans yetarli emas" });
-    }
-
-    const { rows } = await query(
-      "UPDATE users SET balance = balance - $1 WHERE id = $2 RETURNING id, name, phone, balance",
-      [sum, found[0].id]
-    );
-
-    if (found[0].tg_chat_id) {
-      const { notifyUser } = require("../bot");
-      await notifyUser(found[0].tg_chat_id,
-        `💸 *Hisobingizdan pul ayirildi*\n\nSumma: *${sum.toLocaleString()} so'm*\nQolgan balans: *${Number(rows[0].balance).toLocaleString()} so'm*`,
-        { parse_mode: "Markdown" }
-      ).catch(() => {});
-    }
-
-    res.json({ message: `${sum.toLocaleString()} so'm ayirildi`, user: rows[0] });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ── Operatorlar ro'yxati ─────────────────────────────────────────
 router.get("/operators", async (req, res) => {
   try {
     const { rows } = await query(
@@ -407,7 +435,6 @@ router.get("/operators", async (req, res) => {
   }
 });
 
-// ── Operator qo'shish (faqat bosh operator) ──────────────────────
 router.post("/operators", async (req, res) => {
   if (!isMainOp(req.user)) {
     return res.status(403).json({ message: "Faqat bosh operator operator qo'sha oladi" });
@@ -417,7 +444,6 @@ router.post("/operators", async (req, res) => {
     const search = (identifier || phone || "").trim();
     if (!search) return res.status(400).json({ message: "Telefon yoki ism majburiy" });
 
-    // Try by phone first
     const phoneKey = search.replace(/\D/g, "").slice(-9);
     if (phoneKey === MAIN_OPERATOR_PHONE) {
       return res.status(400).json({ message: "Bosh operator allaqachon operator" });
@@ -429,7 +455,6 @@ router.post("/operators", async (req, res) => {
       );
       targetUser = byPhone[0] || null;
     }
-    // If not found by phone, try by name
     if (!targetUser) {
       const { rows: byName } = await query(
         "SELECT * FROM users WHERE name ILIKE $1 ORDER BY joined DESC LIMIT 1",
@@ -449,7 +474,6 @@ router.post("/operators", async (req, res) => {
   }
 });
 
-// ── Operatorni o'chirish (faqat bosh operator) ───────────────────
 router.delete("/operators/:id", async (req, res) => {
   if (!isMainOp(req.user)) {
     return res.status(403).json({ message: "Faqat bosh operator operatorni o'chira oladi" });
@@ -466,363 +490,6 @@ router.delete("/operators/:id", async (req, res) => {
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
-});
-
-// ── To'lovni operator tomonidan tasdiqlash ───────────────────────
-router.put("/payments/:offerId/confirm", async (req, res) => {
-  try {
-    const { offerId } = req.params;
-
-    // Lock
-    const { rowCount } = await query(
-      "INSERT INTO payment_locks (offer_id) VALUES ($1) ON CONFLICT DO NOTHING",
-      [offerId]
-    );
-    if (rowCount === 0) return res.status(400).json({ message: "Bu to'lov allaqachon qayta ishlanmoqda" });
-
-    try {
-      const { rows: payRows } = await query(
-        `SELECT pay.*, o.product_id, o.buyer_id AS offer_buyer, o.seller_id AS offer_seller,
-                p.name AS product_name, p.price AS product_price,
-                b.name AS buyer_name, b.phone AS buyer_phone, b.telegram AS buyer_tg,
-                s.name AS seller_name, s.phone AS seller_phone, s.telegram AS seller_tg,
-                s.tg_chat_id AS seller_chat, b.tg_chat_id AS buyer_chat
-         FROM payments pay
-         JOIN offers o ON o.id = pay.offer_id
-         LEFT JOIN products p ON p.id = o.product_id
-         LEFT JOIN users b ON b.id = o.buyer_id
-         LEFT JOIN users s ON s.id = o.seller_id
-         WHERE pay.offer_id = $1 LIMIT 1`,
-        [offerId]
-      );
-      if (!payRows[0]) {
-        await query("DELETE FROM payment_locks WHERE offer_id = $1", [offerId]);
-        return res.status(404).json({ message: "To'lov topilmadi" });
-      }
-      const pay = payRows[0];
-      if (pay.status === "confirmed") {
-        await query("DELETE FROM payment_locks WHERE offer_id = $1", [offerId]);
-        return res.status(400).json({ message: "Allaqachon tasdiqlangan" });
-      }
-
-      // Tasdiqlash
-      await query(
-        "UPDATE payments SET status='confirmed', confirmed_at=NOW(), updated_at=NOW() WHERE offer_id=$1",
-        [offerId]
-      );
-      await query(
-        "UPDATE offers SET status='paid', updated_at=NOW() WHERE id=$1",
-        [offerId]
-      );
-      // Post o'chirilsin
-      if (pay.product_id) {
-        await Product.setStatus(pay.product_id, "deleted");
-      }
-
-      const { notifyUser } = require("../bot");
-      const MINI_APP_URL = process.env.MINI_APP_URL || "https://frontend-353d.vercel.app/";
-
-      // Xaridorga
-      if (pay.buyer_chat) {
-        await notifyUser(pay.buyer_chat,
-          `✅ *To'lovingiz tasdiqlandi!*\n\n` +
-          `📦 Mahsulot: ${pay.product_name}\n` +
-          `💰 Summa: ${Number(pay.product_price).toLocaleString()} so'm\n\n` +
-          `📞 Sotuvchi ma'lumotlari:\n` +
-          `👤 Ism: ${pay.seller_name || "Noma'lum"}\n` +
-          `📱 Tel: ${pay.seller_phone || "—"}\n` +
-          `✈️ Telegram: ${pay.seller_tg || "—"}`,
-          { parse_mode: "Markdown" }
-        ).catch(() => {});
-      }
-      // Sotuvchiga
-      if (pay.seller_chat) {
-        await notifyUser(pay.seller_chat,
-          `💸 *To'lov tasdiqlandi, bitim yakunlandi!*\n\n` +
-          `📦 Mahsulot: ${pay.product_name}\n` +
-          `💰 Summa: ${Number(pay.product_price).toLocaleString()} so'm\n\n` +
-          `📞 Xaridor ma'lumotlari:\n` +
-          `👤 Ism: ${pay.buyer_name || "Noma'lum"}\n` +
-          `📱 Tel: ${pay.buyer_phone || "—"}\n` +
-          `✈️ Telegram: ${pay.buyer_tg || "—"}`,
-          { parse_mode: "Markdown" }
-        ).catch(() => {});
-      }
-
-      res.json({ message: "To'lov tasdiqlandi, bitim yakunlandi" });
-    } finally {
-      await query("DELETE FROM payment_locks WHERE offer_id = $1", [offerId]).catch(() => {});
-    }
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ── App orqali kelmagan to'lovlar (pending_payment, payment yo'q) ─
-router.get("/pending-offers", async (req, res) => {
-  try {
-    const { rows } = await query(
-      `SELECT o.id AS offer_id, o.status AS offer_status, o.created_at,
-              p.id AS product_id, p.name AS product_name, p.price AS product_price,
-              b.name AS buyer_name, b.phone AS buyer_phone,
-              s.name AS seller_name, s.phone AS seller_phone
-       FROM offers o
-       LEFT JOIN products p ON p.id = o.product_id
-       LEFT JOIN users b ON b.id = o.buyer_id
-       LEFT JOIN users s ON s.id = o.seller_id
-       LEFT JOIN payments pay ON pay.offer_id = o.id
-       WHERE p.status = 'pending_payment'
-         AND o.status = 'pending'
-         AND pay.id IS NULL
-       ORDER BY o.created_at DESC LIMIT 50`
-    );
-    res.json(rows);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ── Qo'lda to'lovni tasdiqlash (app tashqarisida to'langan) ──────
-router.post("/manual-confirm/:offerId", async (req, res) => {
-  const { offerId } = req.params;
-  const { rowCount } = await query(
-    "INSERT INTO payment_locks (offer_id) VALUES ($1) ON CONFLICT DO NOTHING",
-    [offerId]
-  );
-  if (rowCount === 0) return res.status(400).json({ message: "Allaqachon qayta ishlanmoqda" });
-
-  try {
-    const { rows: offerRows } = await query(
-      `SELECT o.*, p.name AS product_name, p.price AS product_price,
-              b.name AS buyer_name, b.phone AS buyer_phone, b.telegram AS buyer_tg, b.tg_chat_id AS buyer_chat,
-              s.name AS seller_name, s.phone AS seller_phone, s.telegram AS seller_tg, s.tg_chat_id AS seller_chat
-       FROM offers o
-       LEFT JOIN products p ON p.id = o.product_id
-       LEFT JOIN users b ON b.id = o.buyer_id
-       LEFT JOIN users s ON s.id = o.seller_id
-       WHERE o.id = $1 LIMIT 1`,
-      [offerId]
-    );
-    if (!offerRows[0]) return res.status(404).json({ message: "Offer topilmadi" });
-    const offer = offerRows[0];
-    if (offer.status === "paid") return res.status(400).json({ message: "Allaqachon to'langan" });
-
-    const opCard = process.env.OPERATOR_CARD || "9860160619731286";
-    await query(
-      `INSERT INTO payments (offer_id, buyer_id, seller_id, product_id, amount, status, card_to, confirmed_at)
-       VALUES ($1,$2,$3,$4,$5,'confirmed',$6,NOW())
-       ON CONFLICT (offer_id) DO UPDATE SET status='confirmed', confirmed_at=NOW(), updated_at=NOW()`,
-      [offerId, offer.buyer_id, offer.seller_id, offer.product_id, offer.product_price || 0, opCard]
-    );
-    await query("UPDATE offers SET status='paid', updated_at=NOW() WHERE id=$1", [offerId]);
-    if (offer.product_id) await Product.setStatus(offer.product_id, "deleted");
-
-    const { notifyUser } = require("../bot");
-    if (offer.buyer_chat) {
-      await notifyUser(offer.buyer_chat,
-        `✅ *To'lovingiz tasdiqlandi!*\n\n📦 ${offer.product_name}\n\n📞 Sotuvchi:\n👤 ${offer.seller_name||"—"}\n📱 ${offer.seller_phone||"—"}\n✈️ ${offer.seller_tg||"—"}`,
-        { parse_mode: "Markdown" }
-      ).catch(() => {});
-    }
-    if (offer.seller_chat) {
-      await notifyUser(offer.seller_chat,
-        `💸 *Bitim yakunlandi!*\n\n📦 ${offer.product_name}\n\n📞 Xaridor:\n👤 ${offer.buyer_name||"—"}\n📱 ${offer.buyer_phone||"—"}\n✈️ ${offer.buyer_tg||"—"}`,
-        { parse_mode: "Markdown" }
-      ).catch(() => {});
-    }
-    res.json({ message: "Qo'lda tasdiqlandi" });
-  } finally {
-    await query("DELETE FROM payment_locks WHERE offer_id=$1", [offerId]).catch(() => {});
-  }
-});
-
-// ── Operator to'lovlari (pending) ───────────────────────────────
-router.get("/payments", async (req, res) => {
-  try {
-    const { rows } = await query(
-      `SELECT pay.id, pay.offer_id, pay.amount, pay.status, pay.card_from, pay.card_to, pay.note, pay.created_at,
-              p.name AS product_name,
-              b.name AS buyer_name, b.phone AS buyer_phone,
-              s.name AS seller_name, s.phone AS seller_phone
-       FROM payments pay
-       LEFT JOIN offers o ON o.id = pay.offer_id
-       LEFT JOIN products p ON p.id = pay.product_id
-       LEFT JOIN users b ON b.id = pay.buyer_id
-       LEFT JOIN users s ON s.id = pay.seller_id
-       WHERE pay.status = 'pending'
-       ORDER BY pay.created_at DESC LIMIT 50`
-    );
-    res.json(rows);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ── Statistika ───────────────────────────────────────────────────
-router.get("/stats", async (req, res) => {
-  try {
-    const { rows } = await query(`
-      SELECT
-        (SELECT COUNT(*) FROM users) AS total_users,
-        (SELECT COUNT(*) FROM products WHERE status = 'active') AS active_products,
-        (SELECT COUNT(*) FROM products WHERE status = 'pending_approval') AS pending_approval,
-        (SELECT COUNT(*) FROM payments WHERE status = 'pending') AS pending_payments,
-        (SELECT COUNT(*) FROM rentals WHERE status = 'pending_approval') AS pending_rentals,
-        (SELECT COUNT(*) FROM rental_bookings WHERE status = 'confirmed') AS active_bookings
-    `);
-    res.json(rows[0]);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// ── Arenda e'lonlari (operator) ──────────────────────────────────
-router.get("/rentals", async (req, res) => {
-  try {
-    const q = (req.query.q || "").trim();
-    const statusFilter = req.query.status || "";
-    const VALID = ["active","pending_approval","hidden","deleted"];
-    const useStatus = statusFilter && VALID.includes(statusFilter);
-
-    const conds = useStatus ? [`r.status = $1`] : [`r.status != 'deleted'`];
-    const vals  = useStatus ? [statusFilter] : [];
-    let i = vals.length + 1;
-
-    if (q) {
-      conds.push(`(r.name ILIKE $${i} OR u.name ILIKE $${i} OR u.phone ILIKE $${i})`);
-      vals.push(`%${q}%`); i++;
-    }
-
-    const { rows } = await query(
-      `SELECT r.id, r.name, r.price_per_day, r.price_per_hour, r.category, r.viloyat,
-              r.status, r.view_count, r.created_at,
-              u.name AS owner_name, u.phone AS owner_phone
-       FROM rentals r LEFT JOIN users u ON u.id = r.owner_id
-       WHERE ${conds.join(" AND ")} ORDER BY r.created_at DESC LIMIT 50`,
-      vals
-    );
-    res.json(rows);
-  } catch (err) { res.status(500).json({ message: err.message }); }
-});
-
-// ── Arenda tasdiqlash ────────────────────────────────────────────
-router.put("/rentals/:id/approve", async (req, res) => {
-  try {
-    const { rows } = await query(
-      `UPDATE rentals SET status='active', updated_at=NOW() WHERE id=$1 AND status='pending_approval' RETURNING *`,
-      [req.params.id]
-    );
-    if (!rows[0]) return res.status(404).json({ message: "Topilmadi yoki allaqachon ko'rib chiqilgan" });
-
-    // Egaga xabar
-    const { rows: owner } = await query("SELECT tg_chat_id, name FROM users WHERE id=$1", [rows[0].owner_id]);
-    if (owner[0]?.tg_chat_id) {
-      const { notifyUser } = require("../bot");
-      await notifyUser(owner[0].tg_chat_id,
-        `✅ *Arenda e'loningiz tasdiqlandi!*\n\n🏠 ${rows[0].name}\n\n🎉 E'loningiz foydalanuvchilarga ko'rinmoqda!`,
-        { parse_mode: "Markdown" }
-      ).catch(() => {});
-    }
-    res.json({ message: "Tasdiqlandi", rental: rows[0] });
-  } catch (err) { res.status(500).json({ message: err.message }); }
-});
-
-// ── Arenda rad etish ─────────────────────────────────────────────
-router.put("/rentals/:id/reject", async (req, res) => {
-  try {
-    const { reason } = req.body;
-    const { rows } = await query(
-      `UPDATE rentals SET status='deleted', updated_at=NOW() WHERE id=$1 RETURNING *`,
-      [req.params.id]
-    );
-    if (!rows[0]) return res.status(404).json({ message: "Topilmadi" });
-    res.json({ message: "Rad etildi", rental: rows[0] });
-  } catch (err) { res.status(500).json({ message: err.message }); }
-});
-
-// ── Arenda yashirish/ko'rsatish ──────────────────────────────────
-router.put("/rentals/:id/hide", async (req, res) => {
-  try {
-    const { rows } = await query(`UPDATE rentals SET status='hidden', updated_at=NOW() WHERE id=$1 RETURNING *`, [req.params.id]);
-    if (!rows[0]) return res.status(404).json({ message: "Topilmadi" });
-    res.json({ message: "Yashirildi" });
-  } catch (err) { res.status(500).json({ message: err.message }); }
-});
-
-router.put("/rentals/:id/show", async (req, res) => {
-  try {
-    const { rows } = await query(`UPDATE rentals SET status='active', updated_at=NOW() WHERE id=$1 RETURNING *`, [req.params.id]);
-    if (!rows[0]) return res.status(404).json({ message: "Topilmadi" });
-    res.json({ message: "Ko'rsatildi" });
-  } catch (err) { res.status(500).json({ message: err.message }); }
-});
-
-// ── Arenda tahrirlash ────────────────────────────────────────────
-router.put("/rentals/:id/edit", async (req, res) => {
-  try {
-    const allowed = ["name","category","price_per_day","price_per_hour","viloyat","tuman","description"];
-    const fields = []; const vals = [];
-    for (const f of allowed) {
-      if (req.body[f] !== undefined) { fields.push(`${f}=$${vals.length+1}`); vals.push(req.body[f]); }
-    }
-    if (!fields.length) return res.status(400).json({ message: "Hech narsa o'zgarmadi" });
-    vals.push(req.params.id);
-    const { rows } = await query(
-      `UPDATE rentals SET ${fields.join(",")}, updated_at=NOW() WHERE id=$${vals.length} RETURNING *`, vals
-    );
-    if (!rows[0]) return res.status(404).json({ message: "Topilmadi" });
-    res.json({ message: "Yangilandi", rental: rows[0] });
-  } catch (err) { res.status(500).json({ message: err.message }); }
-});
-
-// ── Arenda o'chirish ─────────────────────────────────────────────
-router.delete("/rentals/:id", async (req, res) => {
-  try {
-    await query(`UPDATE rentals SET status='deleted', updated_at=NOW() WHERE id=$1`, [req.params.id]);
-    res.json({ message: "O'chirildi" });
-  } catch (err) { res.status(500).json({ message: err.message }); }
-});
-
-// ── Barcha bronlar (operator) ────────────────────────────────────
-router.get("/rental-bookings", async (req, res) => {
-  try {
-    const { rows } = await query(
-      `SELECT b.*, r.name AS rental_name,
-              u.name AS renter_name, u.phone AS renter_phone,
-              o.name AS owner_name, o.phone AS owner_phone
-       FROM rental_bookings b
-       LEFT JOIN rentals r ON r.id = b.rental_id
-       LEFT JOIN users u ON u.id = b.renter_id
-       LEFT JOIN users o ON o.id = r.owner_id
-       ORDER BY b.created_at DESC LIMIT 100`
-    );
-    res.json(rows.map(b => ({
-      id: b.id, rentalName: b.rental_name,
-      renterName: b.renter_name, renterPhone: b.renter_phone,
-      ownerName: b.owner_name, ownerPhone: b.owner_phone,
-      startDate: b.start_date, endDate: b.end_date,
-      totalDays: b.total_days, totalPrice: Number(b.total_price),
-      fee: Number(b.fee), status: b.status,
-      createdAt: b.created_at,
-    })));
-  } catch (err) { res.status(500).json({ message: err.message }); }
-});
-
-// ── Bronni bekor qilish (operator) ──────────────────────────────
-router.delete("/rental-bookings/:id", async (req, res) => {
-  try {
-    const { rows } = await query(
-      `UPDATE rental_bookings SET status='cancelled', updated_at=NOW() WHERE id=$1 RETURNING *`,
-      [req.params.id]
-    );
-    if (!rows[0]) return res.status(404).json({ message: "Topilmadi" });
-    // Xizmat haqini qaytarish
-    const fee = Number(rows[0].fee || 0);
-    if (fee > 0) {
-      await query("UPDATE users SET balance = balance + $1 WHERE id = $2", [fee, rows[0].renter_id]);
-    }
-    res.json({ message: "Bekor qilindi. Xizmat haqi qaytarildi." });
-  } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 module.exports = router;

@@ -96,12 +96,12 @@ const Product = {
         data.unit || "dona",
         data.qty,
         data.condition || "Yaxshi",
-        data.viloyat,
+        data.viloyat || "",
         data.tuman || "",
         data.photo || null,
         data.photos || null,
         data.owner_id,
-        data.status || "pending_approval",
+        data.status || "active",
       ]
     );
     return rows[0];
@@ -143,7 +143,7 @@ const Product = {
       values.push(extra.rejected_reason);
     }
     // sync is_active flag
-    const isActive = status === "active" || status === "pending_payment";
+    const isActive = status === "active";
     sets.push(`is_active = $${i++}`);
     values.push(isActive);
 

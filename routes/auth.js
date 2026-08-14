@@ -25,6 +25,7 @@ function validateTgInitData(initData) {
 }
 
 const JWT_SECRET = process.env.JWT_SECRET || 'remarket_secret_key_2024';
+const BOT_USERNAME = process.env.TELEGRAM_BOT_USERNAME || "DadajonTort_bot";
 
 const makeToken = (id) =>
   jwt.sign({ id }, JWT_SECRET, { expiresIn: "30d" });
@@ -57,7 +58,7 @@ router.post("/tg-init", async (req, res) => {
 
     const dbUser = await User.findByTgChatId(tgChatId);
     if (!dbUser) {
-      return res.status(404).json({ needBot: true, message: "Ro'yxatdan o'tmagan. @Requrilishbot da /start bosing." });
+      return res.status(404).json({ needBot: true, message: `Ro'yxatdan o'tmagan. @${BOT_USERNAME} da /start bosing.` });
     }
 
     const token = makeToken(dbUser.id);
@@ -94,7 +95,7 @@ router.post("/send-code", async (req, res) => {
       if (!tgChatId) {
         return res.status(400).json({
           needBot: true,
-          message: "Bu raqam ro'yxatdan o'tmagan. @Requrilishbot da /start bosib telefon yuboring.",
+          message: `Bu raqam ro'yxatdan o'tmagan. @${BOT_USERNAME} da /start bosib telefon yuboring.`,
         });
       }
       // Yangi user yaratamiz
@@ -109,7 +110,7 @@ router.post("/send-code", async (req, res) => {
     if (!user.tg_chat_id) {
       return res.status(400).json({
         needBot: true,
-        message: "Telegram akkauntingiz bog'lanmagan. @Requrilishbot da /start bosib telefon yuboring.",
+        message: `Telegram akkauntingiz bog'lanmagan. @${BOT_USERNAME} da /start bosib telefon yuboring.`,
       });
     }
 
@@ -120,7 +121,7 @@ router.post("/send-code", async (req, res) => {
     try {
       await sendTg(
         user.tg_chat_id,
-        `🔐 *ReQurilish — Kirish kodi*\n\n` +
+        `🔐 *Dadajon Tort — Kirish kodi*\n\n` +
         `Sizning kodingiz:\n` +
         `┌─────────────┐\n` +
         `│   \`${code}\`   │\n` +
@@ -185,7 +186,7 @@ router.post("/register", async (req, res) => {
     if (!tgChatId) {
       return res.status(400).json({
         needBot: true,
-        message: "Ro'yxatdan o'tish uchun avval @Requrilishbot da /start bosing va telefon raqamingizni yuboring",
+        message: `Ro'yxatdan o'tish uchun avval @${BOT_USERNAME} da /start bosing va telefon raqamingizni yuboring`,
       });
     }
 
@@ -195,7 +196,7 @@ router.post("/register", async (req, res) => {
 
     const { notifyUser } = require('../bot');
     await notifyUser(user.tg_chat_id,
-      `✅ *ReQurilish'ga xush kelibsiz, ${user.name}!*\n\nRo'yxatdan o'tdingiz.\nTelefon: +998 ${user.phone}`,
+      `✅ *Dadajon Tort'ga xush kelibsiz, ${user.name}!*\n\nRo'yxatdan o'tdingiz.\nTelefon: +998 ${user.phone}`,
       { parse_mode: 'Markdown' }
     ).catch(() => {});
 
@@ -216,7 +217,7 @@ router.post("/login", async (req, res) => {
 
     let user = await User.findOne({ phone });
     if (!user)
-      return res.status(404).json({ message: "Bu raqam topilmadi. @Requrilishbot da ro'yxatdan o'ting" });
+      return res.status(404).json({ message: `Bu raqam topilmadi. @${BOT_USERNAME} da ro'yxatdan o'ting` });
 
     const { verifyOtp } = require('../otpStore');
     const result = verifyOtp(phone, code);

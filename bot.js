@@ -2,7 +2,7 @@ const { Telegraf } = require("telegraf");
 const User = require("./models/User");
 const { createToken } = require("./tgTokens");
 
-const MINI_APP_URL = () => process.env.MINI_APP_URL || "https://requrilish.vercel.app/";
+const MINI_APP_URL = () => process.env.MINI_APP_URL || "https://dadajon-tort.vercel.app/";
 const OPERATOR_PHONES = ["331350206"];
 
 let bot = null;
@@ -25,7 +25,7 @@ function getBot() {
             {
               reply_markup: {
                 inline_keyboard: [[
-                  { text: "🏗 ReQurilish'ga kirish", web_app: { url: appUrl } },
+                  { text: "🍰 Dadajon Tort'ga kirish", web_app: { url: appUrl } },
                 ]],
               },
             }
@@ -34,7 +34,7 @@ function getBot() {
       } catch { /* silent */ }
 
       ctx.reply(
-        `Salom! 👋 *ReQurilish*'ga xush kelibsiz!\n\nQurilish materiallari bozori.\n\nKirish uchun telefon raqamingizni yuboring:`,
+        `Salom! 👋 *Dadajon Tort*'ga xush kelibsiz!\n\nMazali tortlar va shirinliklar do'koni.\n\nKirish uchun telefon raqamingizni yuboring:`,
         {
           parse_mode: "Markdown",
           reply_markup: {
@@ -94,7 +94,7 @@ function getBot() {
           parse_mode: "Markdown",
           reply_markup: {
             inline_keyboard: [
-              [{ text: "🏗 ReQurilish'ga kirish", web_app: { url: appUrl } }],
+              [{ text: "🍰 Dadajon Tort'ga kirish", web_app: { url: appUrl } }],
             ],
           },
         });
@@ -113,16 +113,16 @@ function getBot() {
 
     bot.command("help", (ctx) => {
       ctx.reply(
-        `📖 *ReQurilish Bot yordam*\n\n` +
+        `📖 *Dadajon Tort Bot yordam*\n\n` +
         `/start — Botni boshlash, kirish havolasi\n` +
         `/id — Telegram ID ni ko'rish\n\n` +
-        `❓ Muammo bo'lsa: @Requrilish_admin ga murojaat qiling`,
+        `❓ Muammo bo'lsa: @Dadajon_admin ga murojaat qiling`,
         { parse_mode: "Markdown" }
       );
     });
 
     bot.launch()
-      .then(() => console.log("🤖 ReQurilish bot ishga tushdi (polling rejim)"))
+      .then(() => console.log("🤖 Dadajon Tort bot ishga tushdi (polling rejim)"))
       .catch(err => {
         console.error("❌ Bot launch xatosi:", err.message);
         if (err.message.includes("401")) {
