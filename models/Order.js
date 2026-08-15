@@ -4,6 +4,22 @@ function attachItems(order, items) {
   return { ...order, items };
 }
 
+function randomCode() {
+  return String(Math.floor(10000 + Math.random() * 90000));
+}
+
+async function generateUniquePickupCode(client) {
+  for (let i = 0; i < 10; i++) {
+    const code = randomCode();
+    const { rows } = await client.query(
+      `SELECT 1 FROM orders WHERE pickup_code = $1 AND status = 'pending'`,
+      [code]
+    );
+    if (!rows[0]) return code;
+  }
+  return randomCode();
+}
+
 const Order = {
   async create({ customerId, items, pickupTime, note }) {
     return withTransaction(async (client) => {
@@ -38,10 +54,11 @@ const Order = {
         });
       }
 
+      const pickupCode = await generateUniquePickupCode(client);
       const { rows: orderRows } = await client.query(
-        `INSERT INTO orders (customer_id, pickup_time, total_price, note)
-         VALUES ($1, $2, $3, $4) RETURNING *`,
-        [customerId, pickupTime || null, totalPrice, note || ""]
+        `INSERT INTO orders (customer_id, pickup_time, total_price, note, pickup_code)
+         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+        [customerId, pickupTime || null, totalPrice, note || "", pickupCode]
       );
       const order = orderRows[0];
 
@@ -87,6 +104,19 @@ const Order = {
        LEFT JOIN users u ON u.id = o.customer_id
        WHERE o.qr_token = $1 LIMIT 1`,
       [token]
+    );
+    const order = rows[0];
+    if (!order) return null;
+    return attachItems(order, await this._itemsFor(order.id));
+  },
+
+  async findByCode(code) {
+    const { rows } = await query(
+      `SELECT o.*, u.name AS customer_name, u.phone AS customer_phone
+       FROM orders o
+       LEFT JOIN users u ON u.id = o.customer_id
+       WHERE o.pickup_code = $1 AND o.status = 'pending' LIMIT 1`,
+      [code]
     );
     const order = rows[0];
     if (!order) return null;

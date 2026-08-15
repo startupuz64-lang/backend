@@ -172,6 +172,18 @@ router.get("/orders/qr/:qrToken", async (req, res) => {
   }
 });
 
+router.get("/orders/code/:code", async (req, res) => {
+  try {
+    const code = (req.params.code || "").replace(/\D/g, "");
+    if (code.length !== 5) return res.status(400).json({ message: "Kod 5 xonali bo'lishi kerak" });
+    const order = await Order.findByCode(code);
+    if (!order) return res.status(404).json({ message: "Bunday kodli kutilayotgan buyurtma topilmadi" });
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 router.put("/orders/:id/complete", async (req, res) => {
   try {
     const { isPaid } = req.body || {};

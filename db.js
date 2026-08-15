@@ -444,6 +444,15 @@ async function initTables(p) {
     END $$;
   `).catch(() => {});
 
+  await run(`
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='orders' AND column_name='pickup_code'
+      ) THEN ALTER TABLE orders ADD COLUMN pickup_code VARCHAR(5); END IF;
+    END $$;
+  `).catch(() => {});
+
   // 12. Order items
   await run(`
     CREATE TABLE IF NOT EXISTS order_items (
