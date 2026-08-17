@@ -56,8 +56,10 @@ app.use("/api/settings",  settingsRoutes);
 // ── Ping: Render + Neon ni uyg'otadi ─────────────────────────────
 app.get("/api/ping", async (_req, res) => {
   res.json({ ok: true }); // darhol javob
-  // Neon ni fonda uyg'otish (javobni kutmaymiz)
-  try { const { query } = require("./db"); query("SELECT 1"); } catch {}
+  // Neon ni fonda uyg'otish (javobni kutmaymiz) — .catch() shart, aks holda
+  // pool band bo'lganda "unhandled rejection" butun serverni qulatib qo'yadi
+  const { query } = require("./db");
+  query("SELECT 1").catch(() => {});
 });
 
 // ── Health check ─────────────────────────────────────────────────

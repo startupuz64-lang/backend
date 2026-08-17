@@ -18,6 +18,13 @@ function getPool() {
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
     });
+
+    // Idle client-lardagi kutilmagan xatolar (masalan tarmoq uzilishi) "error"
+    // hodisasi sifatida chiqadi — tinglovchi bo'lmasa Node butun jarayonni
+    // qulatadi. Shu yerda ushlab, faqat log qilamiz.
+    pool.on("error", (err) => {
+      console.error("⚠️  PG pool xatosi (idle client):", err.message);
+    });
   }
   return pool;
 }
